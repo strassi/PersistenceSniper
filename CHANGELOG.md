@@ -1,4 +1,13 @@
 # Changelog
+## 1.16.0
+Features:
+   - Detection for AppInit DLLs persistence (MITRE ATT&CK T1546.010)
+   - Detection for Print Monitor DLLs persistence (MITRE ATT&CK T1547.010)
+   - Detection for Netsh Helper DLLs persistence (MITRE ATT&CK T1546.007)
+   - Detection for Time Providers DLL persistence (MITRE ATT&CK T1547.003)
+   - Detection for Office Test registry key persistence (MITRE ATT&CK T1137.002)
+   - Detection for Protocol Handler hijacking (MITRE ATT&CK T1218) - included in high false positives checks
+
 ## 1.15.1
 Fixes:
    - Fixed a gap in the detection of the techniques which relied on Get-IfSafeExecutable function which would prevent Powershell persistences from showing up

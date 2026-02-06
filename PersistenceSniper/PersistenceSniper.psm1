@@ -1,6 +1,6 @@
 <#PSScriptInfo
 
-    .VERSION 1.15.1
+    .VERSION 1.16.0
 
     .GUID 3ce01128-01f1-4503-8f7f-2e50deb56ebc
 
@@ -154,7 +154,13 @@ function Find-AllPersistence {
       'RIDHijacking',
       'SubornerAttack',
       'DSRMBackdoor',
-      'GhostTask'
+      'GhostTask',
+      'AppInitDLLs',
+      'PrintMonitorDLLs',
+      'NetshHelperDLLs',
+      'TimeProviders',
+      'OfficeTestKey',
+      'ProtocolHandlers'
     )]
     $PersistenceMethod = 'All',
      
@@ -1938,6 +1944,164 @@ function Find-AllPersistence {
       } 
       Write-Verbose -Message ''
     }
+
+    function Get-AppInitDLLs {
+      Write-Verbose -Message "$hostname - Getting AppInit_DLLs..."
+      foreach ($hive in $systemAndUsersHives) {
+        $appInitDLLsPath = "$hive\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Windows"
+        $appInitProps = Get-ItemProperty -Path $appInitDLLsPath
+        if ($appInitProps) {
+          $appInitDLLs = $appInitProps.AppInit_DLLs
+          $loadAppInitDLLs = $appInitProps.LoadAppInit_DLLs
+          if ($appInitDLLs -and $appInitDLLs.Trim() -ne '') {
+            Write-Verbose -Message "$hostname - [!] Found AppInit_DLLs under $(Convert-Path -Path $hive) which deserve investigation!"
+            $dlls = $appInitDLLs -split ','
+            foreach ($dll in $dlls) {
+              $dll = $dll.Trim()
+              if ($dll -eq '') { continue }
+              $dllPath = [System.Environment]::ExpandEnvironmentVariables($dll)
+              if (([System.IO.Path]::IsPathRooted($dllPath)) -eq $false) {
+                $dllPath = "C:\Windows\System32\$dllPath"
+              }
+              if ((Get-IfSafeLibrary $dllPath) -eq $false) {
+                $propPath = (Convert-Path -Path $appInitProps.PSPath) + '\AppInit_DLLs'
+                $PersistenceObject = New-PersistenceObject -Hostname $hostname -Technique 'AppInit DLLs' -Classification 'MITRE ATT&CK T1546.010' -Path $propPath -Value $dll -AccessGained 'System/User' -Note "The DLLs specified in the AppInit_DLLs property of (HKLM|HKEY_USERS\<SID>)\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Windows are loaded into every user-mode process that loads user32.dll. LoadAppInit_DLLs is currently set to $loadAppInitDLLs (1 = enabled)." -Reference 'https://attack.mitre.org/techniques/T1546/010/'
+                $null = $persistenceObjectArray.Add($PersistenceObject)
+              }
+            }
+          }
+        }
+      }
+      Write-Verbose -Message ''
+    }
+
+    function Get-PrintMonitorDLLs {
+      Write-Verbose -Message "$hostname - Getting Print Monitor DLLs..."
+      $defaultMonitors = @('APMon.dll', 'localspl.dll', 'tcpmon.dll', 'usbmon.dll', 'WSDMon.dll', 'lprmon.dll')
+      foreach ($hive in $systemAndUsersHives) {
+        $monitorKeys = Get-ChildItem -Path "$hive\SYSTEM\CurrentControlSet\Control\Print\Monitors"
+        foreach ($key in $monitorKeys) {
+          $driverDll = (Get-ItemProperty -Path $key.PSPath).Driver
+          if ($null -ne $driverDll) {
+            $dllPath = [System.Environment]::ExpandEnvironmentVariables($driverDll)
+            if (([System.IO.Path]::IsPathRooted($dllPath)) -eq $false) {
+              $dllPath = "C:\Windows\System32\$dllPath"
+            }
+            if ($defaultMonitors -notcontains (Split-Path -Path $dllPath -Leaf) -and (Get-IfSafeLibrary $dllPath) -eq $false) {
+              Write-Verbose -Message "$hostname - [!] Found a non-default Print Monitor DLL under $(Convert-Path -Path $hive)\SYSTEM\CurrentControlSet\Control\Print\Monitors!"
+              $propPath = (Convert-Path -Path $key.PSPath) + '\Driver'
+              $PersistenceObject = New-PersistenceObject -Hostname $hostname -Technique 'Print Monitor DLL' -Classification 'MITRE ATT&CK T1547.010' -Path $propPath -Value $driverDll -AccessGained 'System' -Note 'The DLL specified in the "Driver" property of (HKLM|HKEY_USERS\<SID>)\SYSTEM\CurrentControlSet\Control\Print\Monitors\<MonitorName> is loaded by the print spooler service (spoolsv.exe) at system startup with SYSTEM privileges.' -Reference 'https://attack.mitre.org/techniques/T1547/010/'
+              $null = $persistenceObjectArray.Add($PersistenceObject)
+            }
+          }
+        }
+      }
+      Write-Verbose -Message ''
+    }
+
+    function Get-NetshHelperDLLs {
+      Write-Verbose -Message "$hostname - Getting Netsh Helper DLLs..."
+      foreach ($hive in $systemAndUsersHives) {
+        $netshHelperKeys = Get-ChildItem -Path "$hive\SOFTWARE\Microsoft\Netsh"
+        foreach ($key in $netshHelperKeys) {
+          $helperDll = (Get-ItemProperty -Path $key.PSPath).'(default)'
+          if ($null -eq $helperDll) {
+            $props = Get-ItemProperty -Path $key.PSPath
+            foreach ($prop in (Get-Member -MemberType NoteProperty -InputObject $props)) {
+              if ($psProperties.Contains($prop.Name)) { continue }
+              $helperDll = $props.($prop.Name)
+              break
+            }
+          }
+          if ($null -ne $helperDll -and $helperDll.Trim() -ne '') {
+            $dllPath = [System.Environment]::ExpandEnvironmentVariables($helperDll)
+            if (([System.IO.Path]::IsPathRooted($dllPath)) -eq $false) {
+              $dllPath = "C:\Windows\System32\$dllPath"
+            }
+            if ((Get-IfSafeLibrary $dllPath) -eq $false) {
+              Write-Verbose -Message "$hostname - [!] Found a Netsh Helper DLL under $(Convert-Path -Path $hive)\SOFTWARE\Microsoft\Netsh which deserves investigation!"
+              $propPath = Convert-Path -Path $key.PSPath
+              $PersistenceObject = New-PersistenceObject -Hostname $hostname -Technique 'Netsh Helper DLL' -Classification 'MITRE ATT&CK T1546.007' -Path $propPath -Value $helperDll -AccessGained 'System' -Note 'The DLLs registered under (HKLM|HKEY_USERS\<SID>)\SOFTWARE\Microsoft\Netsh are loaded every time netsh.exe is executed. If an attacker registers a malicious DLL, it will be loaded when netsh.exe runs.' -Reference 'https://attack.mitre.org/techniques/T1546/007/'
+              $null = $persistenceObjectArray.Add($PersistenceObject)
+            }
+          }
+        }
+      }
+      Write-Verbose -Message ''
+    }
+
+    function Get-TimeProviders {
+      Write-Verbose -Message "$hostname - Getting Time Provider DLLs..."
+      $defaultTimeProviderDlls = @('w32time.dll', 'vmictimeprovider.dll')
+      foreach ($hive in $systemAndUsersHives) {
+        $timeProviderKeys = Get-ChildItem -Path "$hive\SYSTEM\CurrentControlSet\Services\W32Time\TimeProviders"
+        foreach ($key in $timeProviderKeys) {
+          $dllName = (Get-ItemProperty -Path $key.PSPath).DllName
+          if ($null -ne $dllName) {
+            $dllPath = [System.Environment]::ExpandEnvironmentVariables($dllName)
+            if (([System.IO.Path]::IsPathRooted($dllPath)) -eq $false) {
+              $dllPath = "C:\Windows\System32\$dllPath"
+            }
+            if ($defaultTimeProviderDlls -notcontains (Split-Path -Path $dllPath -Leaf) -and (Get-IfSafeLibrary $dllPath) -eq $false) {
+              Write-Verbose -Message "$hostname - [!] Found a non-default Time Provider DLL under $(Convert-Path -Path $hive)\SYSTEM\CurrentControlSet\Services\W32Time\TimeProviders!"
+              $propPath = (Convert-Path -Path $key.PSPath) + '\DllName'
+              $PersistenceObject = New-PersistenceObject -Hostname $hostname -Technique 'Time Providers DLL' -Classification 'MITRE ATT&CK T1547.003' -Path $propPath -Value $dllName -AccessGained 'System' -Note 'The DLL specified in the "DllName" property of (HKLM|HKEY_USERS\<SID>)\SYSTEM\CurrentControlSet\Services\W32Time\TimeProviders\<ProviderName> is loaded by the Windows Time service (svchost.exe) with SYSTEM privileges.' -Reference 'https://attack.mitre.org/techniques/T1547/003/'
+              $null = $persistenceObjectArray.Add($PersistenceObject)
+            }
+          }
+        }
+      }
+      Write-Verbose -Message ''
+    }
+
+    function Get-OfficeTestKey {
+      Write-Verbose -Message "$hostname - Getting Office Test registry keys..."
+      foreach ($hive in $systemAndUsersHives) {
+        $officeVersions = @('16.0', '15.0', '14.0', '12.0', '11.0')
+        foreach ($version in $officeVersions) {
+          $officeTestPath = "$hive\Software\Microsoft\Office test\Special\Perf"
+          $officeTestProps = Get-ItemProperty -Path $officeTestPath
+          if ($officeTestProps) {
+            $defaultValue = $officeTestProps.'(default)'
+            if ($null -ne $defaultValue -and $defaultValue.Trim() -ne '') {
+              Write-Verbose -Message "$hostname - [!] Found an Office Test registry key under $(Convert-Path -Path $hive) which deserves investigation!"
+              $propPath = Convert-Path -Path $officeTestProps.PSPath
+              $PersistenceObject = New-PersistenceObject -Hostname $hostname -Technique 'Office Test Registry Key' -Classification 'MITRE ATT&CK T1137.002' -Path "$propPath\(Default)" -Value $defaultValue -AccessGained 'User' -Note 'The DLL specified in the (Default) property of (HKCU|HKEY_USERS\<SID>)\Software\Microsoft\Office test\Special\Perf is loaded every time any Microsoft Office application is started. This key does not exist by default and is a strong indicator of persistence.' -Reference 'https://attack.mitre.org/techniques/T1137/002/'
+              $null = $persistenceObjectArray.Add($PersistenceObject)
+            }
+          }
+        }
+      }
+      Write-Verbose -Message ''
+    }
+
+    function Get-ProtocolHandlers {
+      Write-Verbose -Message "$hostname - Getting suspicious protocol handler commands..."
+      $defaultProtocols = @('batfile', 'cmdfile', 'comfile', 'exefile', 'ftp', 'http', 'https', 'inffile', 'jsefile', 'Microsoft.PowerShellScript.1', 'piffile', 'regfile', 'scrfile', 'scriptletfile', 'vbefile', 'vbsfile', 'wsffile')
+      foreach ($hive in $systemAndUsersHives) {
+        $protocolKeys = Get-ChildItem -Path "$hive\SOFTWARE\Classes" -ErrorAction SilentlyContinue
+        foreach ($key in $protocolKeys) {
+          $urlProtocolProp = Get-ItemProperty -Path $key.PSPath -Name 'URL Protocol' -ErrorAction SilentlyContinue
+          if ($null -ne $urlProtocolProp) {
+            $shellOpenCmd = Get-ItemProperty -Path "$($key.PSPath)\shell\open\command" -ErrorAction SilentlyContinue
+            if ($shellOpenCmd) {
+              $cmdValue = $shellOpenCmd.'(default)'
+              if ($null -ne $cmdValue -and $cmdValue.Trim() -ne '') {
+                $protocolName = Split-Path -Path $key.PSPath -Leaf
+                if ($defaultProtocols -contains $protocolName) { continue }
+                if (Get-IfSafeExecutable $cmdValue) { continue }
+                Write-Verbose -Message "$hostname - [!] Found a suspicious URL protocol handler '$protocolName' under $(Convert-Path -Path $hive)!"
+                $propPath = (Convert-Path -Path $key.PSPath) + '\shell\open\command'
+                $PersistenceObject = New-PersistenceObject -Hostname $hostname -Technique 'Protocol Handler Hijacking' -Classification 'MITRE ATT&CK T1218' -Path $propPath -Value $cmdValue -AccessGained 'User' -Note "The command in the shell\open\command of the URL protocol handler '$protocolName' under (HKLM|HKEY_USERS\<SID>)\SOFTWARE\Classes\ is executed when a URL with this protocol scheme is opened. Attackers can register or hijack custom protocol handlers to execute arbitrary commands." -Reference 'https://attack.mitre.org/techniques/T1218/'
+                $null = $persistenceObjectArray.Add($PersistenceObject)
+              }
+            }
+          }
+        }
+      }
+      Write-Verbose -Message ''
+    }
+
     function Out-EventLog {
 
       Param (
@@ -2004,6 +2168,12 @@ function Find-AllPersistence {
           'Suborner Attack'                                           = $null
           'DSRM Backdoor'                                             = $null
           'GhostTask'                                                 = $null
+          'AppInit DLLs'                                                = $null
+          'Print Monitor DLL'                                           = $null
+          'Netsh Helper DLL'                                            = $null
+          'Time Providers DLL'                                          = $null
+          'Office Test Registry Key'                                    = $null
+          'Protocol Handler Hijacking'                                  = $null
         }
 
         # Collect the keys in a separate list
@@ -2089,12 +2259,18 @@ function Find-AllPersistence {
       Get-RidHijacking
       Get-DSRMBackdoor
       Get-GhostTask
-      
+      Get-AppInitDLLs
+      Get-PrintMonitorDLLs
+      Get-NetshHelperDLLs
+      Get-TimeProviders
+      Get-OfficeTestKey
+
       if ($IncludeHighFalsePositivesChecks.IsPresent) {
         Write-Verbose -Message "$hostname - You have used the -IncludeHighFalsePositivesChecks switch, this may generate a lot of false positives since it includes checks with results which are difficult to filter programmatically..."
         Get-AppPaths
         Get-WindowsServices
         Get-ScheduledTasks
+        Get-ProtocolHandlers
       }
     }
     
@@ -2318,8 +2494,32 @@ function Find-AllPersistence {
           Get-GhostTask
           break
         }
+        'AppInitDLLs' {
+          Get-AppInitDLLs
+          break
+        }
+        'PrintMonitorDLLs' {
+          Get-PrintMonitorDLLs
+          break
+        }
+        'NetshHelperDLLs' {
+          Get-NetshHelperDLLs
+          break
+        }
+        'TimeProviders' {
+          Get-TimeProviders
+          break
+        }
+        'OfficeTestKey' {
+          Get-OfficeTestKey
+          break
+        }
+        'ProtocolHandlers' {
+          Get-ProtocolHandlers
+          break
+        }
       }
-    }      
+    }
         
     
     if ($LogFindings.IsPresent) {
